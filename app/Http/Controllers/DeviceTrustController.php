@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Database\QueryException;
 
 class DeviceTrustController extends Controller
 {
@@ -18,40 +19,51 @@ class DeviceTrustController extends Controller
             ?? $r->header('X-User-Id'); // fallback
     }
 
-    // private function ensureLocalUser(Request $r, string $externalId): User
-    // {
-    //     $defaults = [
-    //         // on capture quelques infos du token si dispo, sans casser ton schéma
-    //         'nom'        => $r->attributes->get('token_data')->family_name ?? null,
-    //         'prenom'     => $r->attributes->get('token_data')->given_name ?? null,
-    //         'email'      => $r->attributes->get('token_data')->email ?? null,
-    //         'telephone'  => $r->attributes->get('token_data')->phone_number ?? null,
-    //     ];
+    /**
+     * Résout l'utilisateur local.
+     * - Si DEVICE_TRUST_AUTOCREATE_USER=true (défaut) : crée en "best-effort" avec les claims disponibles.
+     * - Sinon : renvoie null si absent (à gérer par l'appelant avec 409).
+     */
+    private function resolveLocalUser(Request $r, string $externalId): ?User
+    {
+        $existing = User::where('external_id', $externalId)->first();
+        if ($existing) {
+            return $existing;
+        }
 
-    //     $user = User::firstOrCreate(['external_id' => $externalId], array_filter($defaults, fn($v) => !is_null($v)));
+        $autoCreate = filter_var(env('DEVICE_TRUST_AUTOCREATE_USER', true), FILTER_VALIDATE_BOOLEAN);
+        if (!$autoCreate) {
+            return null; // on laisse l'appelant répondre 409
+        }
 
-    //     // Mise à jour soft si de nouvelles infos arrivent
-    //     $user->fill(array_filter($defaults, fn($v) => !is_null($v)))->save();
+        // Autocréation prudente (peut échouer si colonnes NOT NULL non satisfaites)
+        $td = $r->attributes->get('token_data') ?? [];
+        $defaults = [
+            'nom'       => data_get($td, 'family_name'),
+            'prenom'    => data_get($td, 'given_name'),
+            'email'     => data_get($td, 'email'),
+            'telephone' => data_get($td, 'phone_number'),
+        ];
 
-    //     return $user;
-    // }
-
-    private function ensureLocalUser(Request $r, string $externalId): User
-{
-    $td = $r->attributes->get('token_data') ?? [];
-    $defaults = [
-        'nom'       => data_get($td, 'family_name'),
-        'prenom'    => data_get($td, 'given_name'),
-        'email'     => data_get($td, 'email'),
-        'telephone' => data_get($td, 'phone_number'),
-    ];
-
-    $user = User::firstOrCreate(['external_id' => $externalId], array_filter($defaults));
-    $user->fill(array_filter($defaults))->save();
-
-    return $user;
-}
-
+        try {
+            $user = User::firstOrCreate(['external_id' => $externalId], array_filter($defaults));
+            $user->fill(array_filter($defaults))->save();
+            return $user;
+        } catch (QueryException $qe) {
+            // Colonnes NOT NULL manquantes => on bascule en "profile_missing"
+            Log::warning('device_trust.autocreate_failed', [
+                'external_id' => $externalId,
+                'error'       => $qe->getMessage(),
+            ]);
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('device_trust.autocreate_failed', [
+                'external_id' => $externalId,
+                'error'       => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
 
     /** GET /devices — liste des équipements de l’utilisateur */
     public function index(Request $request): JsonResponse
@@ -97,7 +109,10 @@ class DeviceTrustController extends Controller
             return response()->json(['error' => 'Unauthorized'], 401);
         }
 
-        $user = $this->ensureLocalUser($request, $externalId);
+        $user = $this->resolveLocalUser($request, $externalId);
+        if (!$user) {
+            return response()->json(['error' => 'profile_missing', 'message' => 'Create or complete user profile before trusting device.'], 409);
+        }
 
         $fp         = (string) $request->string('fingerprint');
         $deviceName = (string) $request->string('device_name', 'Unknown');
@@ -118,18 +133,18 @@ class DeviceTrustController extends Controller
 
         if (!$device) {
             $device = TrustedDevice::create([
-                'user_id'         => $user->id,
-                'fingerprint'     => $fp,
-                'device_name'     => $deviceName,
-                'platform'        => $platform,
-                'is_trusted'      => true,
-                'trust_level'     => $trustLevel,
-                'risk_score'      => 0,
-                'mfa_verified'    => $mfaPassed,
-                'first_trusted_at'=> now(),
-                'last_seen_at'    => now(),
-                'ip'              => $ip,
-                'user_agent'      => $ua,
+                'user_id'          => $user->id,
+                'fingerprint'      => $fp,
+                'device_name'      => $deviceName,
+                'platform'         => $platform,
+                'is_trusted'       => true,
+                'trust_level'      => $trustLevel,
+                'risk_score'       => 0,
+                'mfa_verified'     => $mfaPassed,
+                'first_trusted_at' => now(),
+                'last_seen_at'     => now(),
+                'ip'               => $ip,
+                'user_agent'       => $ua,
             ]);
         } else {
             $device->fill([

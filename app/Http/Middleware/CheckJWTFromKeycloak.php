@@ -7,6 +7,7 @@ use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 use Illuminate\Auth\GenericUser;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Symfony\Component\HttpFoundation\Response;
 
 class CheckJWTFromKeycloak
@@ -38,7 +39,11 @@ class CheckJWTFromKeycloak
                 'realm_access'        => ['roles' => $roles],
                 'token'               => $decoded,
             ]);
+
+            // for request()->user()
             $request->setUserResolver(fn () => $genericUser);
+            // for Auth::user() dans les contrôleurs
+            Auth::setUser($genericUser);
 
             // attributes pour les autres middlewares
             $request->attributes->add([

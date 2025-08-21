@@ -35,24 +35,32 @@ Route::middleware(['keycloak'])->group(function () {
     // ZTA pour PII
     Route::middleware(['context.enricher', 'resource.tag:PII', 'pdp'])->group(function () {
 
-        // Onboarding
+        // Onboarding (écriture PII) — applique throttle dédié
         Route::post('/onboarding/banking-client', [OnboardingController::class, 'registerBankingClient'])
-            ->middleware('check.role:client_bancaire')
+            ->middleware(['check.role:client_bancaire', 'throttle:pii-write'])
             ->name('onboarding.banking');
 
         Route::post('/onboarding/non-banking-client', [OnboardingController::class, 'registerNonBankingClient'])
-            ->middleware('check.role:client_non_bancaire')
+            ->middleware(['check.role:client_non_bancaire', 'throttle:pii-write'])
             ->name('onboarding.non_banking');
 
         // Profil & documents (clients)
         Route::middleware('check.role:client_bancaire,client_non_bancaire')->group(function () {
             Route::get('/users/profile',    [UserController::class, 'profile'])->name('users.profile.show');
-            Route::put('/users/profile',    [UserController::class, 'updateProfile'])->name('users.profile.update');
+
+            Route::put('/users/profile',    [UserController::class, 'updateProfile'])
+                ->middleware(['throttle:pii-write'])
+                ->name('users.profile.update');
+
             Route::get('/users/documents',  [UserController::class, 'getDocuments'])->name('users.docs.index');
-            Route::post('/users/documents', [UserController::class, 'uploadDocument'])->name('users.docs.upload');
+
+            Route::post('/users/documents', [UserController::class, 'uploadDocument'])
+                ->middleware(['throttle:pii-write'])
+                ->name('users.docs.upload');
 
             // Trusted devices
             Route::get('/devices',        [DeviceTrustController::class, 'index'])->name('devices.index');
+
             Route::post('/devices/trust', [DeviceTrustController::class, 'trust'])
                 ->middleware(['throttle:api', 'idempotency:600'])
                 ->name('devices.trust');
